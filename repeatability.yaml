@@ -1,0 +1,294 @@
+# =====================================================================
+# repeatability.yaml
+# =====================================================================
+# Edit this file to change scaffold behavior WITHOUT editing Python code.
+#
+# Sections:
+#   llm        - which LLM provider to use, plus provider-specific config
+#   apis       - which API client per API (stub or HTTP), plus base URLs
+#   behaviors  - the placeholder behaviors tested against each scenario
+#   tests      - N runs, thresholds, report directory
+#   scenarios  - per-scenario prompts, params, stub responses, expectations
+#
+# Path resolution: this file is loaded from CWD first, then project root.
+# Override with: REPEATABILITY_CONFIG=/path/to/file.yaml pytest
+#
+# Anything not present here falls back to the Python defaults baked into
+# the scaffold, so you can delete this file and tests still run.
+# =====================================================================
+
+# === LLM Provider ====================================================
+llm:
+  # stub    - deterministic, no network (default for CI)
+  # bedrock - AWS Bedrock via aioboto3
+  provider: stub
+
+  bedrock:
+    model_id: anthropic.claude-3-5-sonnet-20241022-v2:0
+    region: us-east-1
+    temperature: 0.0
+
+# === API Clients =====================================================
+# For each API: type = stub | http
+# When type=http, the scaffold uses real HTTP calls (requires httpx).
+apis:
+  colors:
+    type: stub
+    http:
+      base_url: http://localhost:8080
+  numbers:
+    type: stub
+    http:
+      base_url: http://localhost:8080
+  shapes:
+    type: stub
+    http:
+      base_url: http://localhost:8080
+
+# === Behaviors =======================================================
+# The 9 placeholder modes each API can simulate. Each scenario is run
+# once per behavior; the agent's response is checked against the
+# expectations below.
+behaviors:
+  - successful
+  - empty
+  - not_found
+  - missing_field
+  - malformed_payload
+  - api_400
+  - api_401_403
+  - api_500
+  - timeout
+
+# === Test Execution ==================================================
+tests:
+  n_runs: 10
+  jaccard_threshold: 0.95
+  pass_threshold: 1.0
+  report_dir: reports
+
+# === Scenarios =======================================================
+# Each scenario describes one user request, what API it should hit, what
+# params to send, and what tokens the agent_message must contain for each
+# behavior.
+#
+# Fields:
+#   prompt       - the user prompt sent to the LLM
+#   target_api   - which API client the lambda should invoke
+#   params       - params passed to the API client
+#   stub_response - (only used when llm.provider=stub) canned first-call LLM output
+#   expectations  - per-behavior required tokens (ALL must appear in agent_message)
+#   expectation_groups - (optional) alternative token combinations
+#   agent_messages - (only used when llm.provider=stub) canned second-call LLM output
+#
+scenarios:
+
+  fetch_color_red:
+    prompt: "describe the color red"
+    target_api: colors
+    params:
+      name: red
+    stub_response:
+      action: fetch
+      target_api: colors
+      params:
+        name: red
+      reasoning: "Looking up color information for red as requested."
+    expectations:
+      successful: [red, "#FF0000"]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [red]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    agent_messages:
+      successful: "Red has hex code #FF0000 and complementary cyan."
+      empty: "Color information is currently unavailable."
+      not_found: "No record was not found for that color."
+      missing_field: "Red is available, but other fields were missing."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the color name."
+      api_401_403: "I don't have access to the colors service right now."
+      api_500: "The colors service is reporting a service error. Please try again later."
+      timeout: "The colors service is unavailable. Please try again."
+
+  fetch_color_xyz:
+    prompt: "look up color xyz"
+    target_api: colors
+    params:
+      name: xyz
+    stub_response:
+      action: fetch
+      target_api: colors
+      params:
+        name: xyz
+      reasoning: "Looking up color information for xyz."
+    expectations:
+      successful: [xyz]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [partial]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    agent_messages:
+      successful: "Xyz has hex code #ABCDEF and complementary color."
+      empty: "Color information is currently unavailable."
+      not_found: "No record was not found for that color."
+      missing_field: "I have partial information, but other fields were missing."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the color name."
+      api_401_403: "I don't have access to the colors service right now."
+      api_500: "The colors service is reporting a service error. Please try again later."
+      timeout: "The colors service is unavailable. Please try again."
+
+  check_prime_17:
+    prompt: "is 17 prime?"
+    target_api: numbers
+    params:
+      n: 17
+      property: is_prime
+    stub_response:
+      action: check
+      target_api: numbers
+      params:
+        n: 17
+        property: is_prime
+      reasoning: "Checking whether 17 is a prime number."
+    expectations:
+      successful: ["17", prime]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [partial]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    agent_messages:
+      successful: "Yes, 17 is a prime number."
+      empty: "Number information is currently unavailable."
+      not_found: "Properties not found for that number."
+      missing_field: "I have partial information about 17."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the number."
+      api_401_403: "I don't have access to the numbers service right now."
+      api_500: "The numbers service is reporting a service error. Please try again later."
+      timeout: "The numbers service is unavailable. Please try again."
+
+  check_negative_number:
+    prompt: "is -7 prime?"
+    target_api: numbers
+    params:
+      n: -7
+      property: is_prime
+    stub_response:
+      action: check
+      target_api: numbers
+      params:
+        n: -7
+        property: is_prime
+      reasoning: "Checking whether -7 is a prime number."
+    expectations:
+      successful: ["-7", not]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [partial]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    expectation_groups:
+      successful:
+        - ["-7", not]
+        - ["-7", isn't]
+        - ["-7", "is not"]
+    agent_messages:
+      successful: "By convention, -7 is not prime."
+      empty: "Number information is currently unavailable."
+      not_found: "Properties not found for that number."
+      missing_field: "I have partial information about -7."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the number."
+      api_401_403: "I don't have access to the numbers service right now."
+      api_500: "The numbers service is reporting a service error. Please try again later."
+      timeout: "The numbers service is unavailable. Please try again."
+
+  describe_pentagon:
+    prompt: "describe a pentagon"
+    target_api: shapes
+    params:
+      name: pentagon
+    stub_response:
+      action: describe
+      target_api: shapes
+      params:
+        name: pentagon
+      reasoning: "Describing the pentagon shape."
+    expectations:
+      successful: [pentagon]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [partial]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    expectation_groups:
+      successful:
+        - [pentagon, five]
+        - [pentagon, polygon]
+        - [pentagon, side]
+    agent_messages:
+      successful: "A pentagon is a five-sided polygon."
+      empty: "Shape information is currently unavailable."
+      not_found: "No record was not found for that shape."
+      missing_field: "I have partial information about the pentagon."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the shape name."
+      api_401_403: "I don't have access to the shapes service right now."
+      api_500: "The shapes service is reporting a service error. Please try again later."
+      timeout: "The shapes service is unavailable. Please try again."
+
+  describe_unknown_shape:
+    prompt: "describe a hexaflexagon"
+    target_api: shapes
+    params:
+      name: hexaflexagon
+    stub_response:
+      action: describe
+      target_api: shapes
+      params:
+        name: hexaflexagon
+      reasoning: "Describing the hexaflexagon shape."
+    expectations:
+      successful: [hexaflexagon]
+      empty: [unavailable]
+      not_found: [not found]
+      missing_field: [partial]
+      malformed_payload: [unexpected]
+      api_400: [invalid request]
+      api_401_403: [access]
+      api_500: [service, error]
+      timeout: [unavailable]
+    expectation_groups:
+      successful:
+        - [hexaflexagon]
+        - [flexing, shape]
+    agent_messages:
+      successful: "A hexaflexagon is an unusual flexing shape."
+      empty: "Shape information is currently unavailable."
+      not_found: "No record was not found for that shape."
+      missing_field: "I have partial information about that shape."
+      malformed_payload: "The data I received was unexpected and could not be parsed."
+      api_400: "Invalid request. Please check the shape name."
+      api_401_403: "I don't have access to the shapes service right now."
+      api_500: "The shapes service is reporting a service error. Please try again later."
+      timeout: "The shapes service is unavailable. Please try again."
