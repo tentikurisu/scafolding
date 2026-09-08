@@ -3,13 +3,14 @@
 This is the ONLY file that normally needs structural editing after the
 harness is copied into the destination repository.
 
-It exposes four functions (and an ExecutionResult dataclass) that adapt
-between the harness and your production code:
+It exposes:
 
-    load_production_handler()        -> the real Lambda handler
-    build_lambda_event(scenario)     -> Lambda event dict
-    normalize_response(raw)          -> ExecutionResult
-    install_test_dependencies(...)   -> patch prod LLM/API factories
+  ExecutionResult                 — normalized result shape tests assert against
+  load_production_handler()       — returns the real Lambda handler
+  build_lambda_event(scenario)    — translate scenario -> Lambda event
+  normalize_response(raw)         — translate response -> ExecutionResult
+  install_test_dependencies(...)  — patch prod LLM/API factories
+  invoke_handler(handler, ev, cx) — call a handler whether sync or async
 
 The placeholder implementation below is a literal example (clearly marked
 with TODO). It demonstrates the expected interface but does NOT implement
@@ -30,11 +31,11 @@ The harness's tests do not need to change for any of the above.
 
 from __future__ import annotations
 
-import asyncio
 import importlib
+import inspect
 import os
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Optional
 
 
 # === ExecutionResult: the normalized result shape ====================
@@ -50,6 +51,20 @@ class ExecutionResult:
     api_error: Optional[str] = None
     api_error_category: Optional[str] = None
     raw_response: Any = None
+
+
+# === Handler invocation (sync + async) ============================
+
+async def invoke_handler(handler, event, context) -> Any:
+    """Call a Lambda handler whether it's sync or async.
+
+    AWS Lambda Python handlers are commonly synchronous but may be async.
+    The local tests should not care which style the production code uses.
+    """
+    result = handler(event, context)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 # === Production handler loading ====================================
@@ -80,7 +95,8 @@ def load_production_handler():
 async def _placeholder_handler(event, context):
     """PLACEHOLDER Lambda handler. Demonstrates the expected structure.
 
-    TODO: Replace with a direct import of your real handler.
+    TODO: Replace with a direct import of your real handler. Real
+    handlers are often synchronous; this one is async for demo.
     """
     return await _placeholder_execute(
         event,
@@ -110,7 +126,9 @@ async def _placeholder_execute(event, llm, api_registry):
     if target_api and target_api in api_registry:
         try:
             api_response = await api_registry[target_api].call(params)
-        except BaseException as exc:
+        except Exception as exc:
+            # Use Exception (not BaseException) so control exceptions like
+            # KeyboardInterrupt / SystemExit propagate normally.
             api_error_name = type(exc).__name__
             api_error_category = _categorize(exc)
 
@@ -126,7 +144,7 @@ async def _placeholder_execute(event, llm, api_registry):
     }
 
 
-def _categorize(exc: BaseException) -> str:
+def _categorize(exc: Exception) -> str:
     """Map an exception to a coarse error category."""
     name = type(exc).__name__.lower()
     if "timeout" in name:

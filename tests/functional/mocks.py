@@ -24,7 +24,7 @@ class ConfigurableMockAPI:
         self,
         response: Any = None,
         expected_request: Any = None,
-        exception: Optional[BaseException] = None,
+        exception: Optional[Exception] = None,
     ) -> None:
         self.response = response
         self.expected_request = expected_request

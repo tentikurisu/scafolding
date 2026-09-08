@@ -4,6 +4,10 @@ Each Scenario owns its mock API request/response shape so adding a real
 business API only changes this file (and the project_adapter). Fictional
 scenarios default to `run_against_deployed_lambda=False` and must NEVER be
 flipped to True — they describe made-up examples, not real contracts.
+
+All scenarios run locally with mocks. The `run_against_deployed_lambda`
+flag only controls whether the scenario is ALSO safe to run against the
+deployed Lambda.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ class Scenario:
 
     # Mock configuration for local tests.
     mock_api_response: Optional[dict | list] = None
-    mock_api_exception: Optional[BaseException] = None
+    mock_api_exception: Optional[Exception] = None
 
     # Semantic expectations on the final answer.
     expected_answer_tokens: tuple[str, ...] = ()
@@ -54,6 +58,8 @@ class Scenario:
 # derived from requirements and API contracts (not from observed output).
 
 SCENARIOS: list[Scenario] = [
+    # === Happy path + error matrix (the original 6 scenarios) =========
+
     Scenario(
         name="fetch_record_success",
         question="look up record TEST-001",
@@ -116,12 +122,102 @@ SCENARIOS: list[Scenario] = [
         expected_error_category="client_error",
         run_count=1,
     ),
+
+    # === Configurable response shape demonstrations ====================
+    # These prove the mock API can represent a variety of response shapes
+    # without changing the harness. Replace each with a real scenario
+    # when the contract is known.
+
+    Scenario(
+        name="fetch_record_empty_dict",
+        question="look up record TEST-EMPTY-DICT",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-EMPTY-DICT"},
+        mock_api_response={},
+        expected_answer_tokens=("empty",),
+        forbidden_answer_tokens=("active",),
+    ),
+    Scenario(
+        name="fetch_records_empty_list",
+        question="list records matching TEST-LIST",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-LIST"},
+        mock_api_response=[],
+        expected_answer_tokens=("no", "records"),
+        forbidden_answer_tokens=("active",),
+    ),
+    Scenario(
+        name="fetch_record_missing_status",
+        question="look up record TEST-005",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-005"},
+        mock_api_response={"result": {"id": "TEST-005"}},
+        expected_answer_tokens=("TEST-005", "status", "unavailable"),
+        forbidden_answer_tokens=("active",),
+    ),
+    Scenario(
+        name="fetch_record_malformed_response",
+        question="look up record TEST-BAD",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-BAD"},
+        mock_api_response="not-a-valid-record",
+        expected_answer_tokens=("unexpected",),
+        forbidden_answer_tokens=("active",),
+    ),
+    Scenario(
+        name="fetch_record_nested_response",
+        question="look up record TEST-NEST",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-NEST"},
+        mock_api_response={
+            "result": {
+                "id": "TEST-NEST",
+                "metadata": {"currentStatus": "active", "version": 3},
+            },
+        },
+        expected_answer_tokens=("TEST-NEST", "active"),
+        forbidden_answer_tokens=("error",),
+    ),
+    Scenario(
+        name="fetch_records_multiple",
+        question="list records matching TEST-MULTI",
+        expected_api_name="records",
+        expected_api_request={"asset_id": "TEST-MULTI"},
+        mock_api_response=[
+            {"id": "R1", "currentStatus": "active"},
+            {"id": "R2", "currentStatus": "inactive"},
+        ],
+        expected_answer_tokens=("R1", "R2"),
+        forbidden_answer_tokens=("error",),
+    ),
+
+    # === Example of a real business scenario shape ====================
+    # This is the template you copy and adapt for each real API.
+    # Set `run_against_deployed_lambda=True` once you've confirmed the
+    # scenario behaves safely against the production Lambda.
+    #
+    # Scenario(
+    #     name="real_asset_lookup",
+    #     question="What is the status of asset TEST-001?",
+    #     expected_api_name="assets",
+    #     expected_api_request={"asset_id": "TEST-001"},
+    #     mock_api_response={"result": {"id": "TEST-001", "status": "active"}},
+    #     expected_answer_tokens=("TEST-001", "active"),
+    #     forbidden_answer_tokens=("error",),
+    #     run_count=10,
+    #     minimum_pass_rate=0.9,
+    #     run_against_deployed_lambda=True,
+    # ),
 ]
 
 
 def local_scenarios() -> list[Scenario]:
-    """Scenarios that can be run locally with mocks (never deployed)."""
-    return [s for s in SCENARIOS if not s.run_against_deployed_lambda]
+    """All scenarios run locally with mocks.
+
+    `run_against_deployed_lambda` is independent of this — it only
+    controls whether a scenario ALSO runs against the deployed Lambda.
+    """
+    return list(SCENARIOS)
 
 
 def deployed_scenarios() -> list[Scenario]:

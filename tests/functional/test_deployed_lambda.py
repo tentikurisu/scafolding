@@ -6,9 +6,14 @@ Required environment variables to enable:
     AWS_REGION=<region>
     AWS credentials (any boto3-supported method)
 
-Only runs scenarios with `run_against_deployed_lambda=True`. Never sends
-mock behavior labels or internal scenario names. Raises immediately on
-FunctionError. Supports direct Lambda and API Gateway response shapes.
+Only runs scenarios with `run_against_deployed_lambda=True`. Each scenario
+runs `scenario.run_count` times; the test requires pass rate >=
+`scenario.minimum_pass_rate`. Never sends mock behavior labels or internal
+scenario names. Raises immediately on FunctionError. Supports direct
+Lambda and API Gateway response shapes.
+
+Single compact flow so the Lambda is not invoked repeatedly across
+overlapping test functions.
 
 The entire module is skipped when:
   - No scenarios have run_against_deployed_lambda=True, OR
@@ -61,47 +66,71 @@ def lambda_client():
     return boto3.client("lambda", region_name=os.environ["AWS_REGION"])
 
 
-def test_scenario_against_deployed_lambda(lambda_client):
-    """Invoke the real Lambda for each opted-in scenario and assert semantic expectations.
+def _invoke_once(lambda_client, scenario) -> tuple[bool, str]:
+    """Invoke the Lambda once for this scenario. Returns (ok, failure_reason)."""
+    event = build_lambda_event(scenario)
 
-    Not parametrized — avoids the empty-list-when-no-scenarios warning and
-    gives a single skip with a clear reason.
+    try:
+        resp = lambda_client.invoke(
+            FunctionName=os.environ["EXECUTION_LAMBDA_NAME"],
+            InvocationType="RequestResponse",
+            Payload=json.dumps(event).encode("utf-8"),
+        )
+    except Exception as exc:
+        return False, f"Lambda invocation failed: {exc}"
 
-    No mock behavior labels are sent. No internal scenario names leak
-    into the Lambda event — we use build_lambda_event which only includes
-    fields the real contract needs.
+    if resp.get("FunctionError"):
+        body = resp.get("Payload")
+        body_text = body.read().decode("utf-8") if body else ""
+        return False, f"Lambda FunctionError: {body_text}"
+
+    payload_bytes = resp.get("Payload")
+    if payload_bytes is None:
+        return False, "Lambda returned empty Payload"
+
+    try:
+        raw = json.loads(payload_bytes.read().decode("utf-8"))
+    except json.JSONDecodeError:
+        return False, "Lambda payload not valid JSON"
+
+    # Handle API Gateway-style response: {statusCode, body}
+    if isinstance(raw, dict) and "statusCode" in raw and "body" in raw:
+        if raw["statusCode"] >= 400:
+            return False, f"Lambda status {raw['statusCode']}: {raw.get('body')}"
+        try:
+            raw = json.loads(raw["body"])
+        except json.JSONDecodeError:
+            return False, "Lambda body not valid JSON"
+
+    result = normalize_response(raw)
+    try:
+        assert_scenario(result, scenario)
+        return True, ""
+    except AssertionError as e:
+        return False, str(e)
+
+
+def test_deployed_scenarios(lambda_client):
+    """For each opted-in scenario, run it `run_count` times and require
+    `minimum_pass_rate`.
+
+    Single test function so the Lambda isn't invoked by separate tests
+    for the same scenario. No mock behavior labels are sent. No internal
+    scenario names leak into the Lambda event.
     """
     for scenario in _DEPLOYABLE:
-        event = build_lambda_event(scenario)
+        n = max(1, scenario.run_count)
+        passes = 0
+        failures: list = []
+        for _ in range(n):
+            ok, reason = _invoke_once(lambda_client, scenario)
+            if ok:
+                passes += 1
+            elif len(failures) < 3:
+                failures.append(reason)
 
-        try:
-            resp = lambda_client.invoke(
-                FunctionName=os.environ["EXECUTION_LAMBDA_NAME"],
-                InvocationType="RequestResponse",
-                Payload=json.dumps(event).encode("utf-8"),
-            )
-        except Exception as exc:
-            pytest.fail(f"{scenario.name}: Lambda invocation failed: {exc}")
-
-        if resp.get("FunctionError"):
-            body = resp.get("Payload")
-            body_text = body.read().decode("utf-8") if body else ""
-            pytest.fail(f"{scenario.name}: Lambda FunctionError: {body_text}")
-
-        payload_bytes = resp.get("Payload")
-        if payload_bytes is None:
-            pytest.fail(f"{scenario.name}: Lambda returned empty Payload")
-
-        raw = json.loads(payload_bytes.read().decode("utf-8"))
-
-        # Handle API Gateway-style response: {statusCode, body}
-        if isinstance(raw, dict) and "statusCode" in raw and "body" in raw:
-            if raw["statusCode"] >= 400:
-                pytest.fail(f"{scenario.name}: Lambda status {raw['statusCode']}: {raw.get('body')}")
-            try:
-                raw = json.loads(raw["body"])
-            except json.JSONDecodeError:
-                pytest.fail(f"{scenario.name}: Lambda body not valid JSON: {raw.get('body')}")
-
-        result = normalize_response(raw)
-        assert_scenario(result, scenario)
+        rate = passes / n
+        assert rate >= scenario.minimum_pass_rate, (
+            f"{scenario.name}: pass rate {rate:.2f} < required "
+            f"{scenario.minimum_pass_rate:.2f}. Sample failures: {failures}"
+        )
