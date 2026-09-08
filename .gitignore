@@ -11,3 +11,6 @@ htmlcov/
 dist/
 build/
 .hypothesis/
+*.json
+!pyproject.toml
+!.env.example

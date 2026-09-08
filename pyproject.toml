@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repeatability-scaffold"
+version = "0.3.0"
+description = "Repeatability test scaffold for LLM -> execution lambda -> API"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+aws = [
+    "boto3>=1.34",
+    "aioboto3>=13.0",
+]
+http = [
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scaffold*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: pure unit tests",
+    "component: component tests with mocks",
+    "functional: end-to-end scenarios against SystemUnderTest",
+    "integration: real Lambda / API tests (skipped without AWS)",
+    "mock_only: tests that simulate faults; skipped on Lambda target",
+    "real: tests that require real AWS/API resources",
+]

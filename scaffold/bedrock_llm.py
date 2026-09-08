@@ -1,24 +1,9 @@
-"""Bedrock LLM — real AWS Bedrock implementation.
+"""BedrockLLM — real AWS Bedrock implementation.
 
 Drop-in replacement for MockLLM. Same interface (first_call, second_call).
 
 Install:  pip install aioboto3
-AWS auth: any method supported by boto3 (env vars, ~/.aws/credentials, IAM role, etc.)
-
-Configuration (env vars):
-    AWS_REGION              (default: us-east-1)
-    BEDROCK_MODEL_ID        (default: anthropic.claude-3-5-sonnet-20241022-v2:0)
-    BEDROCK_TEMPERATURE     (default: 0.0 — for determinism)
-
-Usage in conftest.py:
-
-    from bedrock_llm import BedrockLLM
-    llm_factory = BedrockLLM         # uses env vars for config
-    # or with explicit config:
-    llm_factory = lambda: BedrockLLM(model_id="...", region="...")
-
-The scaffold tests run unchanged — only the factory line in conftest.py
-changes from MockLLM to BedrockLLM.
+AWS auth: any method supported by boto3 (env vars, ~/.aws/credentials, IAM role).
 """
 
 from __future__ import annotations
@@ -27,8 +12,6 @@ import json
 import os
 from typing import Any
 
-
-# === Schema definitions (sent to Bedrock as tool-use specs) ==========
 
 _DECISION_TOOL = {
     "toolSpec": {
@@ -82,16 +65,13 @@ _AGENT_MESSAGE_SYSTEM_PROMPT = (
 )
 
 
-# === BedrockLLM ======================================================
-
 class BedrockLLM:
     """Real AWS Bedrock LLM. Drop-in replacement for MockLLM.
 
-    Requires:
-        - aioboto3 (pip install aioboto3)
-        - AWS credentials (any boto3-supported method)
-
-    Configure via env vars or constructor args.
+    Configure via env vars or constructor args:
+        AWS_REGION              (default: us-east-1)
+        BEDROCK_MODEL_ID        (default: anthropic.claude-3-5-sonnet-20241022-v2:0)
+        BEDROCK_TEMPERATURE     (default: 0.0)
     """
 
     DEFAULT_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
@@ -111,7 +91,6 @@ class BedrockLLM:
         )
 
     def _session(self):
-        """Lazy import so aioboto3 isn't required for the mock-only path."""
         try:
             import aioboto3
         except ImportError as exc:
@@ -121,7 +100,6 @@ class BedrockLLM:
         return aioboto3.Session()
 
     async def _converse(self, *, system: str, user_text: str, tool: dict) -> dict:
-        """Single converse call. Returns the parsed tool-use input dict."""
         session = self._session()
         async with session.client("bedrock-runtime", region_name=self.region) as client:
             resp = await client.converse(
@@ -134,22 +112,18 @@ class BedrockLLM:
         return _extract_tool_input(resp, tool_name=tool["toolSpec"]["name"])
 
     async def first_call(self, prompt: str, scenario: str) -> dict[str, Any]:
-        """Stage 1: user prompt -> LLM decision (what API to call)."""
         user_text = f"Scenario: {scenario}\nUser prompt: {prompt}"
         return await self._converse(
-            system=_DECISION_SYSTEM_PROMPT,
-            user_text=user_text,
-            tool=_DECISION_TOOL,
+            system=_DECISION_SYSTEM_PROMPT, user_text=user_text, tool=_DECISION_TOOL,
         )
 
     async def second_call(
         self,
         scenario: str,
         behavior: str,
-        api_response: dict | None,
+        api_response: dict | list | None,
         api_error: str | None,
     ) -> str:
-        """Stage 2: API response -> user-facing agent message."""
         if api_error:
             response_blob = f"(API error: {api_error})"
         elif api_response is None:
@@ -163,17 +137,12 @@ class BedrockLLM:
             f"API response: {response_blob}"
         )
         result = await self._converse(
-            system=_AGENT_MESSAGE_SYSTEM_PROMPT,
-            user_text=user_text,
-            tool=_AGENT_MESSAGE_TOOL,
+            system=_AGENT_MESSAGE_SYSTEM_PROMPT, user_text=user_text, tool=_AGENT_MESSAGE_TOOL,
         )
         return result.get("message", "")
 
 
-# === Tool-use extraction =============================================
-
 def _extract_tool_input(converse_response: dict, *, tool_name: str) -> dict:
-    """Pull the toolUse input dict out of a Bedrock converse response."""
     output = converse_response.get("output", {})
     message = output.get("message", {})
     content = message.get("content", [])
