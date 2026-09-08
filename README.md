@@ -1,261 +1,239 @@
-# Repeatability Scaffold
+# Test Harness for an LLM-driven Execution Lambda
 
-A compact scaffold for testing an **LLM → execution lambda → API** pipeline
-twice: once against local mocks (fast, no AWS), once against a real AWS
-Lambda (real LLM, real APIs).
+A small test harness designed to be copied into another repository
+that already contains the production Lambda handler, LLM integration,
+and API clients.
 
-The tests are written once and switch between targets via `TEST_TARGET`.
+The harness **invokes the real production handler** with mocked
+dependencies for local tests, and the **deployed Lambda** for end-to-end
+tests. It does NOT recreate orchestration logic.
 
 ---
 
-## What this gives you
+## Files (drop these into your repo's `tests/` folder)
 
-| File | Role |
-|---|---|
-| `scaffold/` | The library — drop into your repo's `tests/` folder |
-| `tests/unit/` | Pure unit tests (validators, models) |
-| `tests/component/` | Mock LLM + mock APIs, no network |
-| `tests/functional/` | Scenarios run against `SystemUnderTest` |
-| `tests/integration/` | Real AWS Lambda (skipped without AWS) |
-| `pyproject.toml` | Deps + pytest marker config |
-| `.env.example` | Placeholder env vars (no real secrets) |
+```
+tests/
+├── conftest.py                    fixtures + marker configuration
+├── unit/
+│   └── test_assertions.py         unit tests for the assertion function
+└── functional/
+    ├── scenarios.py               central Scenario dataclass + list
+    ├── assertions.py              assert_scenario(result, scenario)
+    ├── project_adapter.py         FOUR functions to adapt (see below)
+    ├── mocks.py                   ConfigurableMockAPI (one generic class)
+    ├── test_local_handler.py      local tests against real handler + mocks
+    └── test_deployed_lambda.py    deployed tests (opt-in)
 
-## How tests are organized
-
-| Marker | Meaning | Touches network? |
-|---|---|---|
-| `unit` | Pure logic, no fixtures | No |
-| `component` | Mock LLM + mock APIs | No |
-| `functional` | End-to-end scenarios | No (mock) / Yes (lambda) |
-| `integration` | Real Lambda | Yes |
-| `mock_only` | Simulated fault injection | Skipped on lambda |
-| `real` | Needs AWS creds | Skipped on mock |
-
-Suggested invocations:
-
-```bash
-# Everything local, no AWS — what you run in CI
-pytest -m "not real and not integration"
-
-# Only the functional layer
-pytest -m functional
-
-# Same tests, against a real Lambda
-TEST_TARGET=lambda EXECUTION_LAMBDA_NAME=my-lambda pytest -m "functional and not mock_only"
+pyproject.toml                     test deps + pytest markers
+.env.example                       placeholder env vars
+README.md                          this file
 ```
 
-## The two system-under-test implementations
+## Three test levels
 
-```python
-class SystemUnderTest(Protocol):
-    async def invoke(
-        self,
-        prompt: str,
-        scenario: str | None = None,
-        behavior: str = "successful",
-    ) -> ExecutionResult: ...
-```
+| Marker | Target | When it runs | AWS/LLM cost |
+|---|---|---|---|
+| `unit` | `assert_scenario` function | every pytest run | None |
+| `functional` | real handler + mocks | every pytest run | None |
+| `deployed` | deployed AWS Lambda | only when opted in | Lambda + LLM + APIs |
 
-- `LocalMockSystem` — runs LLM → API → LLM locally with mocks. Fast,
-  deterministic, no AWS. Used by default and by CI.
-- `AwsLambdaSystem` — invokes a real AWS Lambda via boto3 and normalizes
-  the result into the same `ExecutionResult`.
-
-Switch with `TEST_TARGET=mock|lambda`. Tests don't change.
-
-## Running
-
-### Local (default)
+## Commands
 
 ```bash
-pip install -e ".[dev]"
+# Install (no AWS, no httpx)
+pip install -e ".[test]"
+
+# Run everything locally — no AWS contact
 pytest
+
+# Just unit tests
+pytest -m unit
+
+# Just local functional tests
+pytest -m "functional and not deployed"
+
+# Opt into deployed Lambda tests
+RUN_DEPLOYED_FUNCTIONAL_TESTS=true \
+EXECUTION_LAMBDA_NAME=my-execution-lambda \
+AWS_REGION=us-east-1 \
+pytest -m deployed
 ```
 
-Expected: `100 passed, 18 skipped`. Skipped tests are `integration` (need AWS).
+An ordinary `pytest` run never contacts AWS or any external API.
 
-### Against the real Lambda
+## The four functions to adapt in `tests/functional/project_adapter.py`
 
-```bash
-export TEST_TARGET=lambda
-export AWS_REGION=us-east-1
-export EXECUTION_LAMBDA_NAME=my-execution-lambda
-export AWS_ACCESS_KEY_ID=...          # or any other boto3 auth
-export AWS_SECRET_ACCESS_KEY=...
-pytest -m functional
-```
+This is the ONLY file that normally needs structural editing after the
+harness is copied into your repository.
 
-Expected: functional tests run against the real Lambda; integration
-tests need `pytest -m integration` explicitly (and AWS creds).
+### 1. `load_production_handler()`
 
-## Switching the LLM
-
-The default `MockLLM` is deterministic. To swap in AWS Bedrock:
+Returns your real Lambda handler. Two options:
 
 ```python
-# In a conftest or test file
-from scaffold import LocalMockSystem
-from scaffold.bedrock_llm import BedrockLLM
-
-system = LocalMockSystem(llm=BedrockLLM(), api_registry=...)
+# Option A: import directly (recommended)
+from my_project.execution import lambda_handler
+return lambda_handler
 ```
 
-Tests that rely on deterministic mock responses will need their thresholds
-relaxed (the scaffold's `Scenario.minimum_pass_rate` defaults to 1.0;
-set to 0.9 for real LLMs).
+```python
+# Option B: load from env at runtime
+EXECUTION_HANDLER_PATH=my_project.execution:lambda_handler
+```
 
-## Central scenario definitions
+### 2. `build_lambda_event(scenario)`
 
-All test scenarios are defined once in `scaffold/scenarios.py`. Adding a
-new scenario is one `Scenario(...)` object:
+Translates a `Scenario` into the event shape your Lambda expects.
+
+```python
+def build_lambda_event(scenario) -> dict:
+    return {"prompt": scenario.question, "user_id": "test-user"}
+```
+
+### 3. `normalize_response(raw)`
+
+Translates the raw Lambda response into the harness's `ExecutionResult`.
+The harness asserts on this normalized shape — fields it doesn't find
+are skipped, not failed.
+
+```python
+def normalize_response(raw):
+    return ExecutionResult(
+        answer_text=raw["answer"],
+        target_api=raw.get("trace", {}).get("tool"),
+        tool_parameters=raw.get("trace", {}).get("arguments"),
+        api_response=raw.get("trace", {}).get("api_response"),
+        api_error=raw.get("error"),
+        raw_response=raw,
+    )
+```
+
+### 4. `install_test_dependencies(monkeypatch, mocks)`
+
+Patches your production LLM/API factories so the handler uses mocks.
+This is the only function that knows how your production code is wired.
+
+```python
+# Example for module-level factories:
+def install_test_dependencies(monkeypatch, mocks):
+    monkeypatch.setattr("my_project.execution.create_llm",
+                        lambda: mocks["llm"])
+    monkeypatch.setattr("my_project.execution.create_api_registry",
+                        lambda: mocks["registry"])
+```
+
+```python
+# Example for a class-based handler:
+def install_test_dependencies(monkeypatch, mocks):
+    monkeypatch.setattr(MyHandler, "create_llm",
+                        classmethod(lambda cls: mocks["llm"]))
+```
+
+The expected ideal production shape:
+
+```python
+def lambda_handler(event, context):
+    return execute(
+        event,
+        llm=create_llm(),
+        api_registry=create_api_registry(),
+    )
+
+def execute(event, llm, api_registry):
+    # ... real orchestration ...
+```
+
+If your handler can't inject deps this cleanly, `install_test_dependencies`
+should use `monkeypatch.setattr` to swap whatever the handler calls.
+
+## How tests work
+
+```python
+async def test_scenario_against_actual_handler(scenario, handler, fake_context, monkeypatch):
+    # 1. Build mocks from the scenario.
+    mocks = _make_mocks(scenario)
+
+    # 2. Patch production dependencies.
+    install_test_dependencies(monkeypatch, mocks)
+
+    # 3. Run the real production handler.
+    event = build_lambda_event(scenario)
+    raw = await handler(event, fake_context)
+
+    # 4. Normalize + assert.
+    result = normalize_response(raw)
+    assert_scenario(result, scenario)
+
+    # 5. Verify the request actually reached the API (not just what LLM said).
+    assert mocks["api"].calls[-1] == scenario.expected_api_request
+```
+
+## Adding a scenario
+
+In `tests/functional/scenarios.py`:
 
 ```python
 Scenario(
     name="fetch_user_profile",
-    prompt="look up user profile for alice",
-    expected_target_api="users",
-    expected_tool_parameters={"user_id": "alice"},
-    expected_response_tokens=["alice", "profile"],
-    forbidden_response_tokens=["password"],
-    supports_real_target=True,
+    question="look up user alice",
+    expected_api_name="users",
+    expected_api_request={"user_id": "alice"},
+    mock_api_response={"id": "alice", "name": "Alice"},
+    expected_answer_tokens=("Alice",),
 )
 ```
 
-Tests parametrize over `scenarios_for_target(TEST_TARGET)`. Adding
-`fetch_user_profile` to the central collection is the only change needed;
-no edits across multiple test files.
+That's it — no edits to test files, assertion function, or mocks.
 
-## Fault injection (local mocks only)
+## Replacing a fictional API contract with a real one
 
-The scaffold separates the production APIClient interface from fault
-injection:
+The fictional examples use a `records` API with `asset_id` / `currentStatus`.
+To replace with a real API:
 
-```python
-# Production-shaped interface (no behavior arg):
-class APIClient(Protocol):
-    name: str
-    async def call(self, params: dict) -> dict | list | None: ...
+1. Add the real `Scenario(...)` to `tests/functional/scenarios.py`:
 
-# Local-mock fault injection (test-only):
-class FaultInjector:
-    def __init__(self, client: APIClient): ...
-    async def call(self, params, *, behavior="successful"): ...
-```
+   ```python
+   Scenario(
+       name="search_drawings",
+       question="find drawings referencing ABC-123",
+       expected_api_name="drawings",
+       expected_api_request={"drawing_reference": "ABC-123", "include_relationships": True},
+       mock_api_response={
+           "matches": [
+               {"drawing_reference": "ABC-123", "connected_assets": ["SIGNAL-7"]}
+           ],
+           "count": 1,
+       },
+       expected_answer_tokens=("ABC-123", "SIGNAL-7"),
+       forbidden_answer_tokens=("password",),
+   )
+   ```
 
-Production code never sees a `behavior` argument. The `LocalMockSystem`
-wraps each registered API in a `FaultInjector`. Tests targeting the real
-Lambda don't run mock-only fault tests (`@pytest.mark.mock_only`,
-auto-skipped).
+2. No other files need to change. The mock API takes any dict, the
+   assertions check tokens, the harness doesn't care that `drawings`
+   exists.
 
-## Real Lambda response mapping
+3. The Scenario owns its request shape, response shape, expected tokens,
+   and forbidden tokens. Adding a new API is data, not code.
 
-`AwsLambdaSystem._parse_response` handles the two response shapes:
+## Costs
 
-1. **Direct dict** (Lambda proxy integration):
-   `{"response_text": "...", "target_api": "...", "api_error": "..."}`
-2. **API Gateway style**: `{"statusCode": 200, "body": "<json>"}`
-
-When you finalize the real Lambda's event/response schema, update this
-one method — no test changes.
-
-## HTTP API adapter
-
-`scaffold/api_adapter.py` provides `ApiAdapter` for testing API endpoints
-directly (not through the Lambda). Single entry point
-`request_and_normalize` that handles auth, error mapping, and response
-validation. Status codes preserved on exceptions. No committed
-credentials; env-driven.
-
-```python
-adapter = ApiAdapter(
-    base_url="https://api.internal/colors",
-    default_headers={"Authorization": f"Bearer {os.environ['API_TOKEN']}"},
-    schema=ColorsResponse,
-)
-result = await adapter.fetch_color("red")  # 404 -> None, 4xx -> APIClientError
-```
-
-## Why expectations come from contracts, not observed output
-
-When integrating a real LLM, it is tempting to write expectations that
-match whatever the LLM happens to produce. Don't. That codifies the
-current model's behaviour into the tests and makes them pass even when
-the model is wrong.
-
-Instead:
-- Express expectations as **requirements** ("the agent must say
-  `not found` when the API returns nothing").
-- Express **forbidden tokens** to catch hallucination ("the agent must
-  not invent a hex code when the API returned nothing").
-- Use `minimum_pass_rate` for real LLMs (e.g., 0.9) — accepts some
-  drift but catches systematic failures.
-
-## What may incur AWS costs
-
-| Test | Cost |
+| Command | AWS/LLM cost |
 |---|---|
-| `unit/`, `component/`, `functional/` against mocks | None |
-| `functional/` against `TEST_TARGET=lambda` | Lambda invocations + Bedrock tokens |
-| `integration/test_lambda.py` | Same — Lambda invocations |
-| HTTP API adapter tests (if you add them) | API endpoint requests |
+| `pytest` | None — runs mocks only |
+| `pytest -m "functional and not deployed"` | None |
+| `RUN_DEPLOYED_FUNCTIONAL_TESTS=true pytest -m deployed` | Lambda invocations + LLM tokens + API calls |
 
-Default `pytest` runs against mocks only. Real-AWS tests are explicitly
-opt-in via `TEST_TARGET=lambda` or the `real` marker.
+Deployed tests are explicitly opt-in via env vars. Default `pytest` is
+free.
 
-## Adding a new scenario
+## Fictional vs real scenarios
 
-1. Add a `Scenario(...)` to `scaffold/scenarios.py`.
-2. Set `supports_real_target` correctly:
-   - `True` if safe to run against the real Lambda (no fault injection).
-   - `False` for simulated 4xx/5xx/timeout — these are skipped on Lambda.
-3. Provide stub decisions in `scaffold/mock_llm.py` (`STUB_RESPONSES`,
-   `AGENT_MESSAGES`) so the local mock system has something to return.
-4. Done. The functional and repeatability tests automatically parametrize
-   over the new scenario.
+Every scenario has `run_against_deployed_lambda: bool = False`. Fictional
+examples MUST keep this `False`. Real business scenarios opt in
+deliberately.
 
-## Adapting to your real Lambda
-
-When the real Lambda's event/response contract is finalized:
-
-1. Update `_build_event` in `scaffold/lambda_system.py` to match the
-   expected event shape.
-2. Update `_parse_response` to match the response shape (direct dict
-   or API Gateway style).
-3. No test changes needed.
-
-## Files
-
-```
-scaffold/
-├── __init__.py          re-exports
-├── config.py            env-driven Config
-├── models.py            ExecutionResult, Scenario (Pydantic)
-├── scenarios.py         central scenario collection
-├── validators.py        contains_all / jaccard / fields_match / category_for_error
-├── api_schemas.py       response Pydantic models
-├── api_adapter.py       HTTP API adapter (httpx)
-├── mock_llm.py          MockLLM (deterministic)
-├── mock_apis.py         Mock*API clients + FaultInjector
-├── mock_system.py       LocalMockSystem (SystemUnderTest impl)
-├── bedrock_llm.py       BedrockLLM (real, opt-in)
-├── lambda_system.py     AwsLambdaSystem (real, opt-in)
-└── system.py            SystemUnderTest protocol + factory
-
-tests/
-├── conftest.py          target selection + fixtures + markers
-├── unit/
-│   ├── test_validators.py
-│   └── test_models.py
-├── component/
-│   ├── test_mock_behaviors.py
-│   └── test_local_pipeline.py
-├── functional/
-│   ├── test_execution.py
-│   └── test_repeatability.py
-└── integration/
-    └── test_lambda.py
-
-pyproject.toml          deps + markers
-.env.example            placeholder env vars
-README.md               this file
-```
+This guarantees the fictional examples can never accidentally run
+against real infrastructure — they describe made-up APIs that don't exist
+in production.
